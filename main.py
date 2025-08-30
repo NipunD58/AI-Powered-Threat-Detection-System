@@ -31,11 +31,57 @@ class ConfigManager:
         self.gemini_api_key = os.getenv('GEMINI_API_KEY')
         self.model_path = 'yolov8n.pt'  
         
-    def validate_config(self) -> bool:
-        if not self.gemini_api_key:
-            st.error("❌ GEMINI_API_KEY environment variable not set!")
-            return False
-        return True
+    def get_api_key_from_user(self) -> str:
+        """Get API key from user input in sidebar if not available in environment"""
+        if 'gemini_api_key' not in st.session_state:
+            st.session_state.gemini_api_key = self.gemini_api_key or ""
+        
+        with st.sidebar:
+            st.header("🔑 API Configuration")
+            
+            if not self.gemini_api_key:
+                st.warning("⚠️ Gemini API key not found in environment")
+                
+                api_key_input = st.text_input(
+                    "Enter your Gemini API Key:",
+                    type="password",
+                    value=st.session_state.gemini_api_key,
+                    placeholder="Your Google Gemini API Key",
+                    help="Get your API key from https://makersuite.google.com/app/apikey"
+                )
+                
+                if api_key_input and api_key_input != st.session_state.gemini_api_key:
+                    st.session_state.gemini_api_key = api_key_input
+                    st.success("✅ API Key updated!")
+                    st.rerun()  # Refresh to validate the new key
+                
+                return st.session_state.gemini_api_key
+            else:
+                st.success("✅ API Key loaded from environment")
+                return self.gemini_api_key
+        
+    def validate_config(self) -> tuple[bool, str]:
+        """Validate configuration and return (is_valid, api_key)"""
+        api_key = self.get_api_key_from_user()
+        
+        if not api_key:
+            with st.sidebar:
+                st.error("❌ Please provide a valid Gemini API Key")
+            return False, ""
+        
+        # Test the API key validity
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            # Try to create a model to test the key
+            model = genai.GenerativeModel('gemini-pro')
+            with st.sidebar:
+                st.success("✅ API Key validated successfully")
+            return True, api_key
+        except Exception as e:
+            with st.sidebar:
+                st.error(f"❌ Invalid API Key: {str(e)}")
+            return False, ""
 
 class ObjectDetector:
     def __init__(self, model_path: str):
@@ -340,20 +386,33 @@ class ThreatDetectionApp:
         self.analyzer = None
         self.agent = AlertAgent()
         self.initialization_error = None
-        if self.config.validate_config():
+        
+    def initialize_components(self):
+        """Initialize components with current API key configuration"""
+        is_valid, api_key = self.config.validate_config()
+        if is_valid:
             try:
-                logger.info("Initializing YOLO detector...")
-                self.detector = ObjectDetector(self.config.model_path)
-                logger.info("YOLO detector initialized successfully")
-                logger.info("Initializing Gemini analyzer...")
-                self.analyzer = ThreatAnalyzer(self.config.gemini_api_key)
-                logger.info("Gemini analyzer initialized successfully")
+                if self.detector is None:
+                    logger.info("Initializing YOLO detector...")
+                    self.detector = ObjectDetector(self.config.model_path)
+                    logger.info("YOLO detector initialized successfully")
+                
+                if self.analyzer is None:
+                    logger.info("Initializing Gemini analyzer...")
+                    self.analyzer = ThreatAnalyzer(api_key)
+                    logger.info("Gemini analyzer initialized successfully")
+                
+                self.initialization_error = None
+                return True
+                
             except Exception as e:
                 error_msg = f"Failed to initialize components: {str(e)}"
                 self.initialization_error = error_msg
                 logger.error(f"Component initialization failed: {str(e)}")
+                return False
         else:
             self.initialization_error = "Configuration validation failed"
+            return False
     
     def process_image(self, uploaded_file) -> Tuple[List[Dict], Dict, str]:
         try:
@@ -447,8 +506,10 @@ class ThreatDetectionApp:
             page_icon="🛡️",
             layout="wide"
         )
+        
         st.title("🛡️ AI-Powered Threat Detection System")
         st.markdown("Upload an image to analyze for potential security threats using **dual-layer AI detection**: YOLO object detection + Gemini Vision analysis for comprehensive threat assessment.")
+        
         with st.expander("🔍 How it works"):
             st.markdown("""
             **Dual-Layer Detection Process:**
@@ -460,6 +521,7 @@ class ThreatDetectionApp:
             
             This ensures maximum detection accuracy and minimizes false negatives.
             """)
+        
         with st.sidebar:
             st.header("ℹ️ About")
             st.markdown("""
@@ -476,87 +538,117 @@ class ThreatDetectionApp:
             
             **Supported formats:** JPG, JPEG, PNG
             """)
+        
+        # Initialize components (this handles API key configuration in sidebar)
+        components_ready = self.initialize_components()
+        
+        with st.sidebar:
             st.header("🔧 System Status")
-            if self.config.validate_config():
-                if self.initialization_error:
-                    st.error(f"❌ System Error: {self.initialization_error}")
-                elif self.detector is None or self.analyzer is None:
-                    st.warning("⚠️ Components Not Initialized")
-                else:
-                    st.success("✅ System Ready")
-                    st.info(f"🤖 YOLO Model: {self.config.model_path}")
-                    st.info("🧠 LLM: Google Gemini Vision")
-                    st.info("🔍 Dual-Layer Detection: Active")
+            is_valid, _ = self.config.validate_config()
+            
+            if is_valid and components_ready:
+                st.success("✅ System Ready")
+                st.info(f"🤖 YOLO Model: {self.config.model_path}")
+                st.info("🧠 LLM: Google Gemini Vision")
+                st.info("🔍 Dual-Layer Detection: Active")
+            elif is_valid and not components_ready:
+                st.error(f"❌ System Error: {self.initialization_error}")
+                st.info("Please check your API key and try again.")
             else:
                 st.error("❌ Configuration Error")
-                st.stop()
-        uploaded_file = st.file_uploader(
-            "Choose an image file",
-            type=['jpg', 'jpeg', 'png'],
-            help="Upload an image to analyze for potential threats"
-        )
-        if uploaded_file is not None:
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                st.subheader("📷 Uploaded Image")
-                image = Image.open(uploaded_file)
-                st.image(image, caption="Uploaded Image", use_column_width=True)
-            with col2:
-                st.subheader("🔄 Processing Status")
-                with st.spinner("Processing image..."):
-                    detected_objects, analysis, user_message = self.process_image(uploaded_file)
-                st.success("✅ Analysis Complete!")
-            st.markdown("---")
-            st.header("📊 Analysis Results")
-            col1, col2, col3 = st.columns([1, 1, 1])
-            with col1:
-                st.subheader("🎯 Object Detection Results")
-                if detected_objects:
-                    st.write("**YOLO Detected Objects:**")
-                    for obj in detected_objects:
-                        confidence_pct = obj['confidence'] * 100
-                        st.write(f"• **{obj['class_name']}** ({confidence_pct:.1f}%)")
-                else:
-                    st.write("**YOLO Detection:** No objects found")
-                if 'objects_identified' in analysis and analysis['objects_identified']:
-                    st.write("**AI Vision Identified:**")
-                    for obj in analysis['objects_identified']:
-                        st.write(f"• **{obj}** (Vision AI)")
-                elif 'additional_objects_found' in analysis and analysis['additional_objects_found']:
-                    st.write("**Additional Objects Found by AI:**")
-                    for obj in analysis['additional_objects_found']:
-                        st.write(f"• **{obj}** (Vision AI)")
-                if not detected_objects and not analysis.get('objects_identified') and not analysis.get('additional_objects_found'):
-                    st.info("🔍 Both YOLO and AI Vision performed comprehensive analysis")
-            with col2:
-                st.subheader("🧠 AI Analysis")
-                threat_level = analysis.get('threat_level', 'UNKNOWN')
-                if threat_level == 'HIGH':
-                    st.error(f"🚨 **Threat Level:** {threat_level}")
-                elif threat_level == 'MEDIUM':
-                    st.warning(f"⚠️ **Threat Level:** {threat_level}")
-                else:
-                    st.success(f"✅ **Threat Level:** {threat_level}")
-                is_suspicious = analysis.get('is_suspicious', False)
-                if is_suspicious:
-                    st.error("🔍 **Suspicious Activity:** Yes")
-                else:
-                    st.success("🔍 **Suspicious Activity:** No")
-                confidence = analysis.get('confidence', 0.0)
-                st.metric("📈 Confidence", f"{confidence:.1%}")
-            with col3:
-                st.subheader("💬 AI Reasoning")
-                explanation = analysis.get('explanation', 'No explanation available')
-                st.write(explanation)
-                recommended_action = analysis.get('recommended_action', 'None')
-                st.write(f"**Recommended Action:** {recommended_action}")
-            st.markdown("---")
-            st.header("📋 Summary")
-            st.info(user_message)
-            if hasattr(self.agent, 'alert_log') and self.agent.alert_log:
-                with st.expander("🚨 Alert Log"):
-                    for alert in self.agent.alert_log:
-                        st.json(alert)
+                st.info("Please provide a valid Gemini API key to continue.")
+        
+        # Only show file uploader if components are ready
+        if components_ready:
+            uploaded_file = st.file_uploader(
+                "Choose an image file",
+                type=['jpg', 'jpeg', 'png'],
+                help="Upload an image to analyze for potential threats"
+            )
+            
+            if uploaded_file is not None:
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    st.subheader("📷 Uploaded Image")
+                    image = Image.open(uploaded_file)
+                    st.image(image, caption="Uploaded Image", use_column_width=True)
+                with col2:
+                    st.subheader("🔄 Processing Status")
+                    with st.spinner("Processing image..."):
+                        detected_objects, analysis, user_message = self.process_image(uploaded_file)
+                    st.success("✅ Analysis Complete!")
+                
+                st.markdown("---")
+                st.header("📊 Analysis Results")
+                
+                col1, col2, col3 = st.columns([1, 1, 1])
+                with col1:
+                    st.subheader("🎯 Object Detection Results")
+                    if detected_objects:
+                        st.write("**YOLO Detected Objects:**")
+                        for obj in detected_objects:
+                            confidence_pct = obj['confidence'] * 100
+                            st.write(f"• **{obj['class_name']}** ({confidence_pct:.1f}%)")
+                    else:
+                        st.write("**YOLO Detection:** No objects found")
+                    
+                    if 'objects_identified' in analysis and analysis['objects_identified']:
+                        st.write("**AI Vision Identified:**")
+                        for obj in analysis['objects_identified']:
+                            st.write(f"• **{obj}** (Vision AI)")
+                    elif 'additional_objects_found' in analysis and analysis['additional_objects_found']:
+                        st.write("**Additional Objects Found by AI:**")
+                        for obj in analysis['additional_objects_found']:
+                            st.write(f"• **{obj}** (Vision AI)")
+                    
+                    if not detected_objects and not analysis.get('objects_identified') and not analysis.get('additional_objects_found'):
+                        st.info("🔍 Both YOLO and AI Vision performed comprehensive analysis")
+                
+                with col2:
+                    st.subheader("🧠 AI Analysis")
+                    threat_level = analysis.get('threat_level', 'UNKNOWN')
+                    if threat_level == 'HIGH':
+                        st.error(f"🚨 **Threat Level:** {threat_level}")
+                    elif threat_level == 'MEDIUM':
+                        st.warning(f"⚠️ **Threat Level:** {threat_level}")
+                    else:
+                        st.success(f"✅ **Threat Level:** {threat_level}")
+                    
+                    is_suspicious = analysis.get('is_suspicious', False)
+                    if is_suspicious:
+                        st.error("🔍 **Suspicious Activity:** Yes")
+                    else:
+                        st.success("🔍 **Suspicious Activity:** No")
+                    
+                    confidence = analysis.get('confidence', 0.0)
+                    st.metric("📈 Confidence", f"{confidence:.1%}")
+                
+                with col3:
+                    st.subheader("💬 AI Reasoning")
+                    explanation = analysis.get('explanation', 'No explanation available')
+                    st.write(explanation)
+                    recommended_action = analysis.get('recommended_action', 'None')
+                    st.write(f"**Recommended Action:** {recommended_action}")
+                
+                st.markdown("---")
+                st.header("📋 Summary")
+                st.info(user_message)
+                
+                if hasattr(self.agent, 'alert_log') and self.agent.alert_log:
+                    with st.expander("🚨 Alert Log"):
+                        for alert in self.agent.alert_log:
+                            st.json(alert)
+        else:
+            # Show helpful message when system is not ready
+            st.info("🔧 **System Configuration Required**")
+            st.markdown("""
+            To use the threat detection system, please:
+            1. Enter your Google Gemini API key in the sidebar
+            2. Wait for system validation
+            3. Upload an image for analysis
+            
+            Get your API key from: [Google AI Studio](https://makersuite.google.com/app/apikey)
+            """)
 
 def main():
     try:
