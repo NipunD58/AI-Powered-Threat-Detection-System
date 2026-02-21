@@ -21,16 +21,19 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('threat_detection.log'),
         logging.StreamHandler()
     ]
 )
+try:
+    logging.getLogger().addHandler(logging.FileHandler('threat_detection.log'))
+except (PermissionError, OSError):
+    pass  # Read-only filesystem (e.g. Streamlit Cloud)
 logger = logging.getLogger(__name__)
 
 class ConfigManager:
     def __init__(self):
         self.gemini_api_key = os.getenv('GEMINI_API_KEY')
-        self.model_path = 'yolov8n.pt'  
+        self.model_path = 'yolo26n.pt'  
         
     def get_api_key_from_user(self) -> str:
         """Get API key from user input in sidebar if not available in environment"""
@@ -58,7 +61,11 @@ class ConfigManager:
                     st.session_state.pop('config_validated', None)
                     st.session_state.pop('config_api_key', None)
                     st.success("✅ API Key updated!")
-                    st.rerun()  # Refresh to validate the new key
+                    # Compatible rerun across Streamlit versions
+                    if hasattr(st, 'rerun'):
+                        st.rerun()
+                    else:
+                        st.experimental_rerun()
                 
                 return st.session_state.gemini_api_key
             else:
@@ -67,64 +74,59 @@ class ConfigManager:
         
     def validate_config(self) -> tuple[bool, str]:
         """Validate configuration and return (is_valid, api_key)"""
-        # Return cached result if already validated this run
-        if 'config_validated' in st.session_state and 'config_api_key' in st.session_state:
-            return st.session_state.config_validated, st.session_state.config_api_key
+        # Only cache successful validation; failed results must re-render the text_input
+        if st.session_state.get('config_validated') is True and st.session_state.get('config_api_key'):
+            return True, st.session_state.config_api_key
 
         api_key = self.get_api_key_from_user()
         
         if not api_key:
             with st.sidebar:
                 st.error("❌ Please provide a valid Gemini API Key")
-            st.session_state.config_validated = False
-            st.session_state.config_api_key = ""
             return False, ""
         
-        # Test the API key validity
-        try:
-            client = genai.Client(api_key=api_key)
-            # Try a lightweight call to test the key
-            client.models.generate_content(
-                model='gemini-3-flash-preview',
-                contents='Test'
-            )
+        # Basic format check only; real API validation happens in ThreatAnalyzer init
+        if len(api_key.strip()) < 10:
             with st.sidebar:
-                st.success("✅ API Key validated successfully")
-            st.session_state.config_validated = True
-            st.session_state.config_api_key = api_key
-            return True, api_key
-        except Exception as e:
-            with st.sidebar:
-                st.error(f"❌ Invalid API Key: {str(e)}")
-            st.session_state.config_validated = False
-            st.session_state.config_api_key = ""
+                st.error("❌ API Key appears too short")
             return False, ""
+
+        with st.sidebar:
+            st.success("✅ API Key accepted")
+        st.session_state.config_validated = True
+        st.session_state.config_api_key = api_key
+        return True, api_key
+
+@st.cache_resource
+def load_yolo_model(model_path: str):
+    """Cache YOLO model so it persists across Streamlit reruns."""
+    try:
+        logger.info(f"Loading YOLO model from {model_path}...")
+        model = YOLO(model_path)
+        dummy_image = np.zeros((640, 640, 3), dtype=np.uint8)
+        _ = model(dummy_image, verbose=False)
+        logger.info(f"YOLO model loaded and tested successfully from {model_path}")
+        return model
+    except Exception as e:
+        logger.error(f"Failed to load YOLO model: {str(e)}")
+        alternative_models = ['yolo26s.pt', 'yolo26m.pt', 'yolo26l.pt', 'yolo26x.pt']
+        for alt_model in alternative_models:
+            try:
+                logger.info(f"Trying alternative model: {alt_model}")
+                model = YOLO(alt_model)
+                dummy_image = np.zeros((640, 640, 3), dtype=np.uint8)
+                _ = model(dummy_image, verbose=False)
+                logger.info(f"Successfully loaded alternative model: {alt_model}")
+                return model
+            except Exception as alt_e:
+                logger.warning(f"Alternative model {alt_model} also failed: {str(alt_e)}")
+                continue
+        raise Exception(f"All YOLO models failed to load. Original error: {str(e)}")
 
 class ObjectDetector:
     def __init__(self, model_path: str):
-        try:
-            logger.info(f"Loading YOLO model from {model_path}...")
-            self.model = YOLO(model_path)
-            import numpy as np
-            dummy_image = np.zeros((640, 640, 3), dtype=np.uint8)
-            _ = self.model(dummy_image, verbose=False)
-            logger.info(f"YOLO model loaded and tested successfully from {model_path}")
-        except Exception as e:
-            logger.error(f"Failed to load YOLO model: {str(e)}")
-            alternative_models = ['yolov8s.pt', 'yolov8m.pt', 'yolov8l.pt']
-            for alt_model in alternative_models:
-                try:
-                    logger.info(f"Trying alternative model: {alt_model}")
-                    self.model = YOLO(alt_model)
-                    _ = self.model(dummy_image, verbose=False)
-                    logger.info(f"Successfully loaded alternative model: {alt_model}")
-                    break
-                except Exception as alt_e:
-                    logger.warning(f"Alternative model {alt_model} also failed: {str(alt_e)}")
-                    continue
-            else:
-                raise Exception(f"All YOLO models failed to load. Original error: {str(e)}")
-        if not hasattr(self, 'model') or self.model is None:
+        self.model = load_yolo_model(model_path)
+        if self.model is None:
             raise Exception("YOLO model initialization failed completely")
     
     def detect_objects(self, image: np.ndarray, confidence_threshold: float = 0.5) -> List[Dict]:
@@ -174,7 +176,7 @@ class ThreatAnalyzer:
     def __init__(self, api_key: str):
         try:
             self.client = genai.Client(api_key=api_key)
-            model_names = ['gemini-2.0-flash']
+            model_names = ['gemini-3-flash-preview']
             self.model_name = None
             for model_name in model_names:
                 try:
@@ -261,8 +263,8 @@ class ThreatAnalyzer:
                     logger.info(f"LLM analysis attempt {attempt + 1} {'with image' if image_data else 'text-only'}")
                     if image_data:
                         content = [
-                            genai_types.Part.from_text(prompt),
                             genai_types.Part.from_bytes(data=image_data, mime_type="image/jpeg"),
+                            prompt,
                         ]
                     else:
                         content = prompt
@@ -353,11 +355,12 @@ class AlertAgent:
     
     def generate_user_message(self, analysis: Dict, detected_objects: List[Dict], alert_sent: bool = False, had_yolo_detection: bool = True) -> str:
         try:
-            config = ConfigManager()
-            if not config.gemini_api_key:
+            # Use the API key from session_state (works for both env and user-entered keys)
+            api_key = st.session_state.get('config_api_key', '') or os.getenv('GEMINI_API_KEY', '')
+            if not api_key:
                 return "System message: Analysis completed. Please check the detailed results above."
-            client = genai.Client(api_key=config.gemini_api_key)
-            model_name = 'gemini-2.0-flash-lite'
+            client = genai.Client(api_key=api_key)
+            model_name = 'gemini-3-flash-preview'
             detection_method = "YOLO object detection and AI vision analysis" if had_yolo_detection else "comprehensive AI vision analysis (YOLO detected no objects)"
             prompt = f"""
             Generate a clear, professional message for a user of a security monitoring system.
@@ -395,10 +398,24 @@ class AlertAgent:
 class ThreatDetectionApp:
     def __init__(self):
         self.config = ConfigManager()
-        self.detector = None
-        self.analyzer = None
         self.agent = AlertAgent()
         self.initialization_error = None
+
+    @property
+    def detector(self):
+        return st.session_state.get('_detector')
+
+    @detector.setter
+    def detector(self, value):
+        st.session_state['_detector'] = value
+
+    @property
+    def analyzer(self):
+        return st.session_state.get('_analyzer')
+
+    @analyzer.setter
+    def analyzer(self, value):
+        st.session_state['_analyzer'] = value
         
     def initialize_components(self):
         """Initialize components with current API key configuration"""
@@ -422,6 +439,10 @@ class ThreatDetectionApp:
                 error_msg = f"Failed to initialize components: {str(e)}"
                 self.initialization_error = error_msg
                 logger.error(f"Component initialization failed: {str(e)}")
+                # Clear cached validation so user can re-enter key
+                st.session_state.pop('config_validated', None)
+                st.session_state.pop('config_api_key', None)
+                st.session_state.pop('_analyzer', None)
                 return False
         else:
             self.initialization_error = "Configuration validation failed"
@@ -539,7 +560,7 @@ class ThreatDetectionApp:
             st.header("ℹ️ About")
             st.markdown("""
             This system uses:
-            - **YOLOv8** for object detection
+            - **YOLO26** for object detection
             - **Google Gemini Vision** for AI image analysis
             - **Dual-layer detection** for comprehensive coverage
             - **Automated alerts** for suspicious activities
@@ -554,10 +575,10 @@ class ThreatDetectionApp:
         
         # Initialize components (this handles API key configuration in sidebar)
         components_ready = self.initialize_components()
+        is_valid = st.session_state.get('config_validated', False)
         
         with st.sidebar:
             st.header("🔧 System Status")
-            is_valid, _ = self.config.validate_config()
             
             if is_valid and components_ready:
                 st.success("✅ System Ready")
