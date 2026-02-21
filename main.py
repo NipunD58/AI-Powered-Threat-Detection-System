@@ -47,11 +47,15 @@ class ConfigManager:
                     type="password",
                     value=st.session_state.gemini_api_key,
                     placeholder="Your Google Gemini API Key",
-                    help="Get your API key from https://makersuite.google.com/app/apikey"
+                    help="Get your API key from https://makersuite.google.com/app/apikey",
+                    key="gemini_api_key_input"
                 )
                 
                 if api_key_input and api_key_input != st.session_state.gemini_api_key:
                     st.session_state.gemini_api_key = api_key_input
+                    # Invalidate cached validation so it re-runs with the new key
+                    st.session_state.pop('config_validated', None)
+                    st.session_state.pop('config_api_key', None)
                     st.success("✅ API Key updated!")
                     st.rerun()  # Refresh to validate the new key
                 
@@ -62,11 +66,17 @@ class ConfigManager:
         
     def validate_config(self) -> tuple[bool, str]:
         """Validate configuration and return (is_valid, api_key)"""
+        # Return cached result if already validated this run
+        if 'config_validated' in st.session_state and 'config_api_key' in st.session_state:
+            return st.session_state.config_validated, st.session_state.config_api_key
+
         api_key = self.get_api_key_from_user()
         
         if not api_key:
             with st.sidebar:
                 st.error("❌ Please provide a valid Gemini API Key")
+            st.session_state.config_validated = False
+            st.session_state.config_api_key = ""
             return False, ""
         
         # Test the API key validity
@@ -77,10 +87,14 @@ class ConfigManager:
             model = genai.GenerativeModel('gemini-pro')
             with st.sidebar:
                 st.success("✅ API Key validated successfully")
+            st.session_state.config_validated = True
+            st.session_state.config_api_key = api_key
             return True, api_key
         except Exception as e:
             with st.sidebar:
                 st.error(f"❌ Invalid API Key: {str(e)}")
+            st.session_state.config_validated = False
+            st.session_state.config_api_key = ""
             return False, ""
 
 class ObjectDetector:
