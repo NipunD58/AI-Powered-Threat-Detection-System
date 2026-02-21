@@ -171,7 +171,7 @@ class ThreatAnalyzer:
     def __init__(self, api_key: str):
         try:
             genai.configure(api_key=api_key)
-            model_names = ['gemini-2.0-flash-lite']
+            model_names = ['gemini-3-flash-preview']
             self.model = None
             for model_name in model_names:
                 try:
@@ -674,3 +674,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
