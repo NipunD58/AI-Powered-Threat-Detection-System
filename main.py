@@ -11,7 +11,8 @@ from PIL import Image
 import io
 import os
 from ultralytics import YOLO
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -81,10 +82,12 @@ class ConfigManager:
         
         # Test the API key validity
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            # Try to create a model to test the key
-            model = genai.GenerativeModel('gemini-pro')
+            client = genai.Client(api_key=api_key)
+            # Try a lightweight call to test the key
+            client.models.generate_content(
+                model='gemini-3-flash-preview',
+                contents='Test'
+            )
             with st.sidebar:
                 st.success("✅ API Key validated successfully")
             st.session_state.config_validated = True
@@ -170,19 +173,22 @@ class ObjectDetector:
 class ThreatAnalyzer:
     def __init__(self, api_key: str):
         try:
-            genai.configure(api_key=api_key)
-            model_names = ['gemini-3-flash-preview']
-            self.model = None
+            self.client = genai.Client(api_key=api_key)
+            model_names = ['gemini-2.0-flash']
+            self.model_name = None
             for model_name in model_names:
                 try:
-                    self.model = genai.GenerativeModel(model_name)
-                    test_response = self.model.generate_content("Test")
+                    test_response = self.client.models.generate_content(
+                        model=model_name,
+                        contents='Test'
+                    )
+                    self.model_name = model_name
                     logger.info(f"Gemini LLM initialized successfully with model: {model_name}")
                     break
                 except Exception as model_error:
                     logger.warning(f"Failed to initialize model {model_name}: {str(model_error)}")
                     continue
-            if self.model is None:
+            if self.model_name is None:
                 raise Exception("All Gemini models failed to initialize")
         except Exception as e:
             logger.error(f"Failed to initialize Gemini LLM: {str(e)}")
@@ -254,16 +260,16 @@ class ThreatAnalyzer:
                 try:
                     logger.info(f"LLM analysis attempt {attempt + 1} {'with image' if image_data else 'text-only'}")
                     if image_data:
-                        image_part = {
-                            "mime_type": "image/jpeg",
-                            "data": image_data
-                        }
-                        content = [prompt, image_part]
+                        content = [
+                            genai_types.Part.from_text(prompt),
+                            genai_types.Part.from_bytes(data=image_data, mime_type="image/jpeg"),
+                        ]
                     else:
                         content = prompt
-                    response = self.model.generate_content(
-                        content,
-                        generation_config=genai.types.GenerationConfig(
+                    response = self.client.models.generate_content(
+                        model=self.model_name,
+                        contents=content,
+                        config=genai_types.GenerateContentConfig(
                             temperature=0.3,
                             top_p=0.8,
                             top_k=40,
@@ -350,18 +356,8 @@ class AlertAgent:
             config = ConfigManager()
             if not config.gemini_api_key:
                 return "System message: Analysis completed. Please check the detailed results above."
-            genai.configure(api_key=config.gemini_api_key)
-            model_names = ['gemini-2.0-flash-lite']
-            model = None
-            for model_name in model_names:
-                try:
-                    model = genai.GenerativeModel(model_name)
-                    break
-                except Exception:
-                    continue
-            if model is None:
-                return f"Analysis completed with {analysis['threat_level']} threat level. " + \
-                       ("Authorities have been notified." if alert_sent else "No immediate action required.")
+            client = genai.Client(api_key=config.gemini_api_key)
+            model_name = 'gemini-2.0-flash-lite'
             detection_method = "YOLO object detection and AI vision analysis" if had_yolo_detection else "comprehensive AI vision analysis (YOLO detected no objects)"
             prompt = f"""
             Generate a clear, professional message for a user of a security monitoring system.
@@ -385,7 +381,10 @@ class AlertAgent:
             
             Keep it under 150 words and maintain a professional but friendly tone.
             """
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
             return response.text.strip()
         except Exception as e:
             logger.error(f"Failed to generate user message: {str(e)}")
@@ -674,4 +673,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
